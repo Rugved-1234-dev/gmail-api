@@ -1,51 +1,108 @@
-const {google}  = require('googleapis');
-const nodemailer = require("nodemailer");
-require('dotenv').config()
+import express from "express";
+import dotenv from "dotenv";
+import { google } from "googleapis";
+import fs from "fs";
+import nodemailer from "nodemailer";
 
-const CLIENT_ID = '13262829095-0aji33823e1hf271h36d9ff3pka4nufj.apps.googleusercontent.com'
-const CLIENT_SECRET = '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'
-const REDIRECT_URI = 'https://developers.google.com/oauthplayground'
-const REFRESH_TOKEN = '1//04oOe5kJ_pF8kCgYIARAAGAQSNwF-L9Irkj8JWRIMUTMERQfEebx4KlHtcgFvI5mnUJoK9yxRFp_2UM30xzWZ23cLigHF0GBClc4'
+dotenv.config();
 
+const app = express();
+const port = process.env.PORT || 3000;
 
+app.use(express.json()); // Middleware to parse JSON
 
+const authenticateUser = async (req, res) => {
+  try {
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.CLIENT_ID,
+      process.env.CLIENT_SECRET,
+      process.env.REDIRECT_URI
+    );
 
+    // generate a URL that asks permissions for Gmail scopes
+    const scopes = ["https://www.googleapis.com/auth/gmail.send"];
 
-// const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
-// oAuth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
+    const url = oauth2Client.generateAuthUrl({
+      access_type: "offline", // gets refresh_token
+      scope: scopes,
+    });
 
-// async function sendMail() {
-//     try {
-//         const auth = await oAuth2Client.getAccessToken();
-//         const transport =  nodemailer.createTransport({
-//             service: 'gmail',
-//             auth: {
-//                 type: 'OAuth2',
-//                 user: 'rugved@quickwork.co',
-//                 clientId: CLIENT_ID,
-//                 clientSecret:  CLIENT_SECRET,
-//                 refreshToken: REFRESH_TOKEN,
-//                 accessToken: auth
+    return res.redirect(url);
+  } catch (err) {
+    console.log(err);
+    return res.status(401).json({ message: "Invalid credentials" });
+  }
+};
 
-//             }
-//         })
+const handleCallback = async (req, res) => {
+  try {
+    const { code } = req.query;
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.CLIENT_ID,
+      process.env.CLIENT_SECRET,
+      process.env.REDIRECT_URI
+    );
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
 
-//         const mailOptions = {
-//             from: 'rugved@quickwork.co',
-//             to: 'rugvedkute02@gmail.com',
-//             subject: 'Hello from gmail using API',
-//             text: 'Hello from gmail using API',
-//             html:  '<b>Hello from gmail using API</b>'
+    fs.writeFileSync("tokens.json", JSON.stringify(tokens));
 
-//         }
+    return res.json({
+      token: tokens,
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(401).json({ message: "Invalid credentials" });
+  }
+};
 
-//         const result = await  transport.sendMail(mailOptions);
-//         return result
-//     } catch(err) {
-//         console.log(err);
-//     }
-// }
+const sendMail = async (req, res) => {
+  try {
+    const { subject, body, to } = req.body;
 
-// sendMail().then((res) => console.log(res)).catch((err) => {
-//     console.log(err)
-// })
+    const tokens = JSON.parse(fs.readFileSync("tokens.json", "utf8"));
+
+    const transport = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        type: "OAuth2",
+        user: "rugved@quickwork.co",
+        clientId: process.env.CLIENT_ID,
+        password: "vngt grnh sdwo dqea",
+        clientSecret: process.env.CLIENT_SECRET,
+        refreshToken: tokens.refresh_token,
+        accessToken: tokens.access_token,
+      },
+    });
+
+    const mailOptions = {
+      from: "rugved@quickwork.co",
+      to: to,
+      subject: subject,
+      text: "Hello from gmail using API",
+      html: `<p>${body}</p>`,
+    };
+
+    const result = await transport.sendMail(mailOptions);
+    return res.json({
+      message: "Email sent successfully",
+    });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({
+      message: "Error sending email",
+    });
+  }
+};
+
+// Define routes
+app.get("/auth/initiate", authenticateUser);
+app.get("/auth/callback", handleCallback);
+app.post("/sendMail", sendMail); // Route for sending email
+
+// Listen on the specified port
+app.listen(port, () => {
+  console.log(`Server is running on port ${port}`);
+});
+
+export default app;
