@@ -2,69 +2,21 @@ import express from "express";
 import dotenv from "dotenv";
 import { google } from "googleapis";
 import fs from "fs";
+import axios from "axios";
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(express.json()); 
+app.use(express.json());
+
 const oauth2Client = new google.auth.OAuth2(
-    process.env.CLIENT_ID,
-    process.env.CLIENT_SECRET,
-    process.env.REDIRECT_URI
+  process.env.CLIENT_ID,
+  process.env.CLIENT_SECRET,
+  process.env.REDIRECT_URI
 );
 
-// Check the validity of the access token
-const checkAccessToken = async () => {
-  try {
-    const tokenInfo = await oauth2Client.getTokenInfo(oauth2Client.credentials.access_token);
-    console.log('Access token is valid.');
-    return true; // token is valid
-  } catch (err) {
-    console.log('Access token is invalid or expired.');
-    return false; // token is invalid or expired
-  }
-};
-
-// Refresh the access token using the refresh token
-const checkRefreshToken = async () => {
-  try {
-    const { credentials } = await oauth2Client.refreshAccessToken(); // Automatically refreshes
-    oauth2Client.setCredentials(credentials); // Update OAuth2 client with new credentials
-    console.log('Tokens refreshed successfully.');
-    return true;
-  } catch (err) {
-    console.log('Failed to refresh tokens.', err.message);
-    return false;
-  }
-};
-
-// Validate tokens before sending email
-const validateTokens = async () => {
-  const tokens = JSON.parse(fs.readFileSync('tokens.json', 'utf8'));
-
-  // Set the OAuth2 credentials
-  oauth2Client.setCredentials(tokens);
-
-  // Check if the access token is valid
-  const isAccessTokenValid = await checkAccessToken();
-
-  if (!isAccessTokenValid) {
-    console.log('Access token is expired. Attempting to refresh...');
-    const isRefreshTokenValid = await checkRefreshToken();
-    if (isRefreshTokenValid) {
-      // Store the new tokens to file
-      fs.writeFileSync('tokens.json', JSON.stringify(oauth2Client.credentials));
-      console.log('New tokens saved.');
-      return true;
-    } else {
-      console.log('Both access and refresh tokens are invalid.');
-      return false;
-    }
-  }
-  return true; // Access token is valid
-};
 
 const authenticateUser = async (req, res) => {
   try {
@@ -80,13 +32,16 @@ const authenticateUser = async (req, res) => {
   }
 };
 
+
 const handleCallback = async (req, res) => {
   try {
     const { code } = req.query;
     const { tokens } = await oauth2Client.getToken(code);
 
-    // Save the tokens to a file for later use
+
     fs.writeFileSync("tokens.json", JSON.stringify(tokens));
+
+    oauth2Client.setCredentials(tokens);
 
     return res.json({
       token: tokens,
@@ -97,56 +52,117 @@ const handleCallback = async (req, res) => {
   }
 };
 
+
+const getToken = async (refreshToken) => {
+  try {
+    oauth2Client.setCredentials({ refresh_token: refreshToken });
+    const { credentials } = await oauth2Client.refreshAccessToken();
+    fs.writeFileSync("tokens.json", JSON.stringify(credentials));
+    return credentials.access_token;
+  } catch (err) {
+    console.error("Error in refreshing token:", err);
+    throw err;
+  }
+};
+
+
+const mailAPI = async (baseUrl, encodedEmail, token) => {
+  try {
+    const result = await axios.post(
+      baseUrl,
+      {
+        raw: encodedEmail,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    return {
+      message: "Email sent successfully",
+      result: result.data,
+    };
+  } catch (err) {
+    console.error("Error in mailAPI:", err.response ? err.response.data : err.message);
+    // throw err;
+    return {
+      message: "Error sending email",
+      error: err.response.data || err.message
+    }
+
+  }
+};
+
+
 const sendMail = async (req, res) => {
   try {
     const { subject, body, to } = req.body;
 
-    // Prepare the email content in RFC 822 format
+    if (!to) {
+      return res.status(400).json({
+        message: "Please enter the email address",
+      });
+    }
+
+    const tokens = JSON.parse(fs.readFileSync("tokens.json"));
+    let accessToken = tokens.access_token;
+
+    if (!accessToken) {
+      return res.status(401).json({
+        message: "Access token is missing or invalid",
+      });
+    }
+
+    const baseUrl = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+
+
     const emailContent = [
       `From: "Your Name" <${process.env.USER}>`,
       `To: ${to}`,
       `Subject: ${subject}`,
-      'MIME-Version: 1.0',
+      "MIME-Version: 1.0",
       'Content-Type: text/html; charset="UTF-8"',
-      '',
+      "",
       `${body}`,
-    ].join('\n');
+    ].join("\n");
 
-    // Encode the email in base64 to use in Gmail API
+
     const base64EncodedEmail = Buffer.from(emailContent)
       .toString("base64")
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
 
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    try {
 
-    // Send the email using the Gmail API
-    const result = await gmail.users.messages.send({
-      userId: "me",
-      requestBody: {
-        raw: base64EncodedEmail,
-      },
-    });
+      const result = await mailAPI(baseUrl, base64EncodedEmail, accessToken);
+      return res.json(result);
+    } catch (err) {
+      if (err.response && err.response.status === 401) {
+        accessToken = await getToken(tokens.refresh_token);
+        const result = await mailAPI(baseUrl, base64EncodedEmail, accessToken);
+        return res.json(result);
+      }
 
-    return res.json({
-      message: "Email sent successfully",
-      result: result.data,
-    });
+      throw err;
+    }
   } catch (err) {
-    console.log(err);
+    console.error("Error:", err.response ? err.response.data : err.message);
     return res.status(500).json({
       message: "Error sending email",
+      error: err.response ? err.response.data : err.message,
     });
   }
 };
 
-// Define routes
 app.get("/auth/initiate", authenticateUser);
 app.get("/auth/callback", handleCallback);
-app.post("/sendMail", sendMail); // Route for sending email
+app.post("/sendMail", sendMail); 
 
-// Listen on the specified port
+
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
 });
